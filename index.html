@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Region Listings</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+<!-- PWA / iOS home-screen setup -->
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Listings">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="theme-color" content="#a8461a">
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root {
+    --ink: #1c1b1a; --paper: #faf7f2; --line: #ddd6cb; --accent: #a8461a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; font-family: 'Georgia', 'Iowan Old Style', serif; background: var(--paper); color: var(--ink); overscroll-behavior: none; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* Top bar */
+  #topbar {
+    padding: max(14px, env(safe-area-inset-top)) 16px 12px;
+    background: #fffdfa; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #topbar h1 { font-size: 18px; margin: 0; }
+  #topbar button {
+    background: var(--accent); color: white; border: none; border-radius: 20px;
+    padding: 8px 14px; font-size: 13px; font-family: inherit;
+  }
+
+  #status { padding: 8px 16px; font-size: 12px; color: #857e72; background: #f1ebe0; }
+
+  /* Filters (collapsible on mobile) */
+  #filters {
+    padding: 10px 16px; background: #fffdfa; border-bottom: 1px solid var(--line);
+    display: flex; gap: 8px; overflow-x: auto;
+  }
+  #filters select, #filters input {
+    flex-shrink: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 20px;
+    font-family: inherit; font-size: 13px; background: white; width: 110px;
+  }
+
+  #map { flex: 1; min-height: 200px; }
+
+  #sheet {
+    max-height: 40%; overflow-y: auto; background: #fffdfa; border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #list { list-style: none; padding: 0; margin: 0; }
+  #list li { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  #list .price { font-weight: bold; color: var(--accent); font-size: 15px; }
+  #list .meta { font-size: 12px; color: #857e72; margin-top: 2px; }
+  #list a { color: var(--ink); text-decoration: none; }
+
+  #fileInput { display: none; }
+
+  .listing-popup { font-family: 'Georgia', serif; font-size: 13px; min-width: 170px; }
+  .listing-popup .price { font-size: 15px; font-weight: bold; color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <h1>Region Listings</h1>
+    <button id="loadBtn">Load JSON</button>
+  </div>
+  <input type="file" id="fileInput" accept=".json">
+  <div id="status">No data loaded yet</div>
+
+  <div id="filters">
+    <select id="filterType"><option value="">All types</option></select>
+    <input type="number" id="minPrice" placeholder="Min €">
+    <input type="number" id="maxPrice" placeholder="Max €">
+    <select id="minBedrooms">
+      <option value="">Any beds</option>
+      <option value="1">1+ bed</option>
+      <option value="2">2+ bed</option>
+      <option value="3">3+ bed</option>
+      <option value="4">4+ bed</option>
+    </select>
+  </div>
+
+  <div id="map"></div>
+
+  <div id="sheet"><ul id="list"></ul></div>
+</div>
+
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("service-worker.js").catch(console.error);
+  });
+}
+
+let allListings = [];
+const map = L.map('map', { zoomControl: true }).setView([50.85, 4.35], 8);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+const markerLayer = L.layerGroup().addTo(map);
+
+document.getElementById('loadBtn').addEventListener('click', () => {
+  document.getElementById('fileInput').click();
+});
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      allListings = JSON.parse(evt.target.result);
+      afterLoad();
+    } catch (err) {
+      document.getElementById('status').textContent = 'Could not parse file: ' + err.message;
+    }
+  };
+  reader.readAsText(file);
+});
+
+// On launch, try to auto-load a data.json sitting next to this app
+// (useful once you've deployed and re-run the scraper — just replace that file).
+window.addEventListener('load', async () => {
+  try {
+    const res = await fetch('data.json', { cache: 'no-store' });
+    if (res.ok) {
+      allListings = await res.json();
+      afterLoad('auto-loaded from data.json');
+    }
+  } catch (e) {
+    // fine — user can load a file manually
+  }
+});
+
+function afterLoad(note) {
+  populateTypeFilter();
+  render();
+  document.getElementById('status').textContent =
+    (note ? note + ' · ' : '') + `${allListings.length} listings in file`;
+}
+
+function populateTypeFilter() {
+  const types = [...new Set(allListings.map(l => l.property_type).filter(Boolean))];
+  const sel = document.getElementById('filterType');
+  sel.innerHTML = '<option value="">All types</option>' + types.map(t => `<option value="${t}">${t}</option>`).join('');
+}
+
+['filterType', 'minPrice', 'maxPrice', 'minBedrooms'].forEach(id => {
+  document.getElementById(id).addEventListener('input', render);
+  document.getElementById(id).addEventListener('change', render);
+});
+
+function getFiltered() {
+  const type = document.getElementById('filterType').value;
+  const minPrice = parseFloat(document.getElementById('minPrice').value) || 0;
+  const maxPrice = parseFloat(document.getElementById('maxPrice').value) || Infinity;
+  const minBedrooms = parseInt(document.getElementById('minBedrooms').value) || 0;
+
+  return allListings.filter(l => {
+    if (type && l.property_type !== type) return false;
+    if (l.price != null && (l.price < minPrice || l.price > maxPrice)) return false;
+    if (minBedrooms && (l.bedrooms == null || l.bedrooms < minBedrooms)) return false;
+    return true;
+  });
+}
+
+function render() {
+  const filtered = getFiltered();
+  const withCoords = filtered.filter(l => l.latitude && l.longitude);
+
+  markerLayer.clearLayers();
+  const bounds = [];
+  withCoords.forEach(l => {
+    const marker = L.marker([l.latitude, l.longitude]);
+    marker.bindPopup(`
+      <div class="listing-popup">
+        <div class="price">${l.price_text || (l.price ? '€' + l.price.toLocaleString() : 'Price n/a')}</div>
+        <div>${l.title || l.property_type || ''}</div>
+        <div>${l.locality || ''} ${l.postal_code || ''}</div>
+        <div>${l.bedrooms ? l.bedrooms + ' bed · ' : ''}${l.living_area_m2 ? l.living_area_m2 + ' m²' : ''}</div>
+        ${l.url ? `<a href="${l.url}" target="_blank">View listing →</a>` : ''}
+      </div>
+    `);
+    markerLayer.addLayer(marker);
+    bounds.push([l.latitude, l.longitude]);
+  });
+  if (bounds.length) map.fitBounds(bounds, { padding: [30, 30] });
+
+  const list = document.getElementById('list');
+  list.innerHTML = filtered.slice(0, 200).map(l => `
+    <li onclick="${l.latitude && l.longitude ? `map.setView([${l.latitude},${l.longitude}], 15)` : ''}">
+      <div class="price">${l.price_text || (l.price ? '€' + l.price.toLocaleString() : 'Price n/a')}</div>
+      <div class="meta">${l.title || l.property_type || 'Listing'} — ${l.locality || ''} ${l.postal_code || ''}
+        ${l.url ? ` · <a href="${l.url}" target="_blank">Open →</a>` : ''}</div>
+    </li>
+  `).join('');
+}
+</script>
+</body>
+</html>
